@@ -1,0 +1,45 @@
+name: Build Mac & Windows Apps
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Windows App
+        shell: pwsh
+        run: ./windows/build_win.ps1
+
+      - name: Package Windows Zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/AntigravityCnSwitch-Windows/*" -DestinationPath "dist/AntigravityCnSwitch-Windows-x64.zip" -Force
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AntigravityCnSwitch-Windows-x64
+          path: dist/AntigravityCnSwitch-Windows-x64.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build macOS App (arm64)
+        run: |
+          chmod +x ./mac/build_mac.sh
+          ./mac/build_mac.sh arm64
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "反重力汉化开关.app" "AntigravityCnSwitch-macOS-arm64.zip"
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AntigravityCnSwitch-macOS-arm64
+          path: dist/AntigravityCnSwitch-macOS-arm64.zip
