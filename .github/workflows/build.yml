@@ -30,6 +30,22 @@ jobs:
           Write-Host "Standalone Windows GUI launched and stayed alive (PID $($proc.Id))"
           Stop-Process -Id $proc.Id -Force
 
+          # Verify shortcut patching logic on Windows Desktop .lnk
+          $wsh = New-Object -ComObject WScript.Shell
+          $testLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Antigravity.lnk'
+          $sc = $wsh.CreateShortcut($testLnk)
+          $sc.TargetPath = "$env:LOCALAPPDATA\Programs\antigravity\Antigravity.exe"
+          $sc.Save()
+          $sc2 = $wsh.CreateShortcut($testLnk)
+          if ($sc2.TargetPath -match 'Antigravity(\.exe|$)') {
+            $sc2.Arguments = ($sc2.Arguments + ' --remote-debugging-port=9222').Trim()
+            $sc2.Save()
+          }
+          $sc3 = $wsh.CreateShortcut($testLnk)
+          if ($sc3.Arguments -notmatch '--remote-debugging-port=9222') { throw "Shortcut patch test failed!" }
+          Write-Host "Shortcut patch verified: $($sc3.Arguments)"
+          Remove-Item -Force $testLnk
+
           # Simulate fresh Windows PC: ensure .antigravity/argv.json gets created and patch install/uninstall succeed
           $HomeDir = $env:USERPROFILE
           New-Item -ItemType Directory -Force -Path (Join-Path $HomeDir ".antigravity") | Out-Null

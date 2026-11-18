@@ -631,6 +631,7 @@ namespace AntigravityCnSwitch
                     if (targetState)
                     {
                         EnsureArgvDirsExist();
+                        PatchAntigravityShortcuts(true);
                         UpdateUserConfig(cfg =>
                         {
                             cfg["enabled"] = true;
@@ -650,6 +651,7 @@ namespace AntigravityCnSwitch
                     }
                     else
                     {
+                        PatchAntigravityShortcuts(false);
                         if (File.Exists(installScript))
                         {
                             var res = RunProcess(nodeExe, "--disable-warning=ExperimentalWarning \"" + installScript + "\" uninstall");
@@ -681,6 +683,46 @@ namespace AntigravityCnSwitch
                 Directory.CreateDirectory(Path.Combine(_homeDir, ".antigravity"));
             }
             catch { }
+        }
+
+        private static void PatchAntigravityShortcuts(bool enable)
+        {
+            // Antigravity 2.33.0+ on Windows ignores argv.json and only reads --remote-debugging-port from CLI args.
+            // Patch Desktop, Start Menu, and Taskbar Pinned .lnk shortcuts so launching Antigravity normally works.
+            try
+            {
+                string psScript =
+                    "$wsh = New-Object -ComObject WScript.Shell; " +
+                    "$dirs = @(" +
+                    "[Environment]::GetFolderPath('Desktop'), " +
+                    "[Environment]::GetFolderPath('CommonDesktopDirectory'), " +
+                    "[Environment]::GetFolderPath('Programs'), " +
+                    "[Environment]::GetFolderPath('CommonPrograms'), " +
+                    "(Join-Path $env:APPDATA 'Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar')" +
+                    "); " +
+                    "foreach ($d in $dirs) { " +
+                    "  if (-not $d -or -not (Test-Path $d)) { continue }; " +
+                    "  Get-ChildItem -Path $d -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue | ForEach-Object { " +
+                    "    try { " +
+                    "      $sc = $wsh.CreateShortcut($_.FullName); " +
+                    "      if ($sc.TargetPath -match 'Antigravity(\\.exe|$)') { " +
+                    "        $args = if ($sc.Arguments) { $sc.Arguments } else { '' }; " +
+                    "        $port = if ($sc.TargetPath -match 'Insiders') { '9223' } else { '9222' }; " +
+                    (enable
+                        ? "        if ($args -notmatch '--remote-debugging-port') { $sc.Arguments = ($args + ' --remote-debugging-port=' + $port).Trim(); $sc.Save() } "
+                        : "        $cleaned = ($args -replace '\\s*--remote-debugging-port=\\d+', '').Trim(); if ($cleaned -ne $args) { $sc.Arguments = $cleaned; $sc.Save() } ") +
+                    "      } " +
+                    "    } catch {} " +
+                    "  } " +
+                    "}";
+
+                string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(psScript));
+                RunProcess("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded);
+            }
+            catch (Exception ex)
+            {
+                WriteLog("PatchAntigravityShortcuts failed: " + ex.Message);
+            }
         }
 
         private void StartDaemonDirectlyIfPresent()
