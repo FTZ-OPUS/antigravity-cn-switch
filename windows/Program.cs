@@ -395,14 +395,12 @@ namespace AntigravityCnSwitch
                     }
                     else if (running && portReachable)
                     {
-                        _lblStatusDesc.Text = daemonAlive
-                            ? "已开启 · 守护服务运行中，Antigravity 已自动注入汉化与暖纸主题。"
-                            : "已开启 · 正在唤醒后台守护服务...";
                         _btnRestartApp.Visible = false;
+                        TriggerLiveVerifyProbe();
                     }
                     else
                     {
-                        _lblStatusDesc.Text = "已开启 · 现在打开 Antigravity 即可自动显示中文界面与暖纸护眼主题。";
+                        _lblStatusDesc.Text = "已开启 · 等待 Antigravity 启动（启动后自动汉化）";
                         _btnRestartApp.Visible = false;
                     }
                 }
@@ -428,6 +426,63 @@ namespace AntigravityCnSwitch
                 _lnkFonts.Text = "下载推荐字体";
                 _lnkFonts.LinkColor = _warmOrange;
                 _lnkFonts.Enabled = true;
+            }
+        }
+
+        private bool _isProbingLive;
+
+        private async void TriggerLiveVerifyProbe()
+        {
+            if (_isProbingLive) return;
+            _isProbingLive = true;
+            try
+            {
+                string msg = await Task.Run(() => ProbeLiveStatusMessage());
+                if (!_toggle.Busy && _toggle.Checked && GetAntigravityProcesses().Length > 0)
+                {
+                    _lblStatusDesc.Text = msg;
+                }
+            }
+            finally
+            {
+                _isProbingLive = false;
+            }
+        }
+
+        private string ProbeLiveStatusMessage()
+        {
+            try
+            {
+                string nodeExe = EnsureRuntimeNode();
+                string targetInstall = Path.Combine(_targetDir, "install.mjs");
+                string script = File.Exists(targetInstall) ? targetInstall : ResolveInstallScript();
+                var res = RunProcess(nodeExe, "--disable-warning=ExperimentalWarning \"" + script + "\" doctor");
+                int idx = res.Item2.IndexOf('{');
+                if (idx < 0) return "⚠️ 已开启，但无法读取实时状态";
+
+                var ser = new JavaScriptSerializer();
+                var json = ser.Deserialize<Dictionary<string, object>>(res.Item2.Substring(idx));
+                if (json == null || !json.ContainsKey("liveWindow")) return "⚠️ 已开启，但未获取到窗口信息";
+
+                var live = json["liveWindow"] as Dictionary<string, object>;
+                if (live == null) return "⚠️ 已开启，但未获取到窗口信息";
+
+                bool reachable = live.ContainsKey("reachable") && live["reachable"] is bool && (bool)live["reachable"];
+                if (!reachable)
+                    return "⚠️ Antigravity 已运行但未连上调试端口，请点击下方按钮重启：";
+
+                var state = live.ContainsKey("state") ? live["state"] as Dictionary<string, object> : null;
+                int dictCount = (state != null && state.ContainsKey("dictCount")) ? Convert.ToInt32(state["dictCount"]) : 0;
+                bool hasStyle = state != null && state.ContainsKey("hasStyle") && state["hasStyle"] is bool && (bool)state["hasStyle"];
+
+                if (dictCount > 0 && hasStyle)
+                    return "✅ 已确认汉化成功（已注入 " + dictCount + " 条词条 + 暖纸主题）";
+
+                return "⚠️ 已连接 Antigravity，但尚未检测到汉化注入（词条: " + dictCount + "）";
+            }
+            catch (Exception ex)
+            {
+                return "⚠️ 状态校验失败: " + ex.Message;
             }
         }
 

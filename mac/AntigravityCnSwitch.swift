@@ -59,8 +59,11 @@ final class PatchController: ObservableObject {
 
     init() {
         refreshState()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             self?.checkEnvironmentOnly()
+            if self?.isEnabled == true && self?.isBusy == false {
+                self?.verifyLiveInBackground()
+            }
         }
     }
 
@@ -81,9 +84,58 @@ final class PatchController: ObservableObject {
 
         let serviceActive = isServiceLoaded()
         isEnabled = cfgEnabled && serviceActive
-        statusMessage = isEnabled
-            ? "已开启 · Antigravity 将自动显示中文界面与暖纸护眼主题"
-            : "已关闭 · Antigravity 保持原版英文界面"
+        if !isEnabled {
+            statusMessage = "已关闭 · Antigravity 保持原版英文界面"
+        } else if !antigravityRunning {
+            statusMessage = "已开启 · 等待 Antigravity 启动（启动后自动汉化）"
+        } else {
+            statusMessage = "已开启 · 正在校验 Antigravity 实时汉化状态..."
+            verifyLiveInBackground()
+        }
+    }
+
+    private func verifyLiveInBackground() {
+        guard antigravityRunning else {
+            if isEnabled {
+                statusMessage = "已开启 · 等待 Antigravity 启动（启动后自动汉化）"
+            }
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let msg = self.probeLiveStatusMessage()
+            DispatchQueue.main.async {
+                if self.isEnabled && !self.isBusy {
+                    self.statusMessage = msg
+                }
+            }
+        }
+    }
+
+    private func probeLiveStatusMessage() -> String {
+        guard let nodeBin = try? ensureRuntimeNode() else {
+            return "已开启 · 未找到内置 Node 运行时"
+        }
+        let installScript = "\(targetDir)/install.mjs"
+        let scriptPath = fm.fileExists(atPath: installScript) ? installScript : resolveInstallScript()
+        let res = runCommand(nodeBin, args: ["--disable-warning=ExperimentalWarning", scriptPath, "doctor"])
+        guard let startIdx = res.output.firstIndex(of: "{"),
+              let data = String(res.output[startIdx...]).data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let live = json["liveWindow"] as? [String: Any] else {
+            return "⚠️ 已开启，但无法读取实时状态"
+        }
+        let reachable = (live["reachable"] as? Bool) ?? false
+        if !reachable {
+            return "⚠️ Antigravity 已运行但未连上调试端口，请完全退出并重启 Antigravity 生效"
+        }
+        let state = live["state"] as? [String: Any] ?? [:]
+        let dictCount = (state["dictCount"] as? Int) ?? 0
+        let hasStyle = (state["hasStyle"] as? Bool) ?? false
+        if dictCount > 0 && hasStyle {
+            return "✅ 已确认汉化成功（已注入 \(dictCount) 条词条 + 暖纸主题）"
+        }
+        return "⚠️ 已连接 Antigravity，但尚未检测到汉化注入（词条: \(dictCount)）"
     }
 
     private func checkEnvironmentOnly() {
