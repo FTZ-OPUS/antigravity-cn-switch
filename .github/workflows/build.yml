@@ -15,6 +15,24 @@ jobs:
         shell: pwsh
         run: ./windows/build_win.ps1
 
+      - name: Verify Windows Runtime & Patch Doctor
+        shell: pwsh
+        run: |
+          $OutDir = "dist/AntigravityCnSwitch-Windows"
+          $NodeExe = Join-Path $OutDir "runtime/node.exe"
+          $InstallJs = Join-Path $OutDir "patch/install.mjs"
+          & $NodeExe -v
+          & $NodeExe -e "import('node:sqlite').then(m => console.log('sqlite ok:', typeof m.DatabaseSync))"
+          & $NodeExe $InstallJs doctor
+          $ExePath = (Resolve-Path (Join-Path $OutDir "反重力汉化开关.exe")).Path
+          $proc = Start-Process -FilePath $ExePath -PassThru
+          Start-Sleep -Seconds 3
+          if ($proc.HasExited) {
+            throw "Windows app exited prematurely with code $($proc.ExitCode)"
+          }
+          Write-Host "Windows GUI launched and stayed alive (PID $($proc.Id))"
+          Stop-Process -Id $proc.Id -Force
+
       - name: Package Windows Zip
         shell: pwsh
         run: |
