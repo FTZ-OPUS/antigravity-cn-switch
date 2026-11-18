@@ -4,7 +4,9 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -130,8 +132,10 @@ namespace AntigravityCnSwitch
             _userConfigPath = Path.Combine(_targetDir, "user", "config.json");
             _runtimeNodePath = Path.Combine(_targetDir, "runtime", "node.exe");
             _appBaseDir = AppDomain.CurrentDomain.BaseDirectory;
-            _bundledPatchDir = Path.Combine(_appBaseDir, "patch");
-            _bundledNodePath = Path.Combine(_appBaseDir, "runtime", "node.exe");
+            string localPatch = Path.Combine(_appBaseDir, "patch");
+            string localNode = Path.Combine(_appBaseDir, "runtime", "node.exe");
+            _bundledPatchDir = Directory.Exists(localPatch) ? localPatch : Path.Combine(_targetDir, "bundled-patch");
+            _bundledNodePath = File.Exists(localNode) ? localNode : _runtimeNodePath;
 
             InitUI();
             RefreshState();
@@ -457,8 +461,52 @@ namespace AntigravityCnSwitch
             });
         }
 
+        private void EnsureEmbeddedPayloadExtracted()
+        {
+            string bundledInstall = Path.Combine(_targetDir, "bundled-patch", "install.mjs");
+            if (File.Exists(_runtimeNodePath) && File.Exists(bundledInstall))
+                return;
+
+            using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("AntigravityCnSwitch.payload.zip"))
+            {
+                if (stream == null) return;
+                Directory.CreateDirectory(_targetDir);
+                string tempZip = Path.Combine(Path.GetTempPath(), "ag_cn_payload_" + Guid.NewGuid().ToString("N") + ".zip");
+                try
+                {
+                    using (var fs = File.Create(tempZip))
+                    {
+                        stream.CopyTo(fs);
+                    }
+                    using (var archive = ZipFile.OpenRead(tempZip))
+                    {
+                        foreach (var entry in archive.Entries)
+                        {
+                            string destPath = Path.GetFullPath(Path.Combine(_targetDir, entry.FullName));
+                            if (!destPath.StartsWith(Path.GetFullPath(_targetDir), StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            if (string.IsNullOrEmpty(entry.Name))
+                            {
+                                Directory.CreateDirectory(destPath);
+                            }
+                            else
+                            {
+                                Directory.CreateDirectory(Path.GetDirectoryName(destPath));
+                                entry.ExtractToFile(destPath, true);
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                }
+            }
+        }
+
         private string ResolveInstallScript()
         {
+            EnsureEmbeddedPayloadExtracted();
             string bundled = Path.Combine(_bundledPatchDir, "install.mjs");
             if (File.Exists(bundled)) return bundled;
             return Path.Combine(_targetDir, "install.mjs");
@@ -466,6 +514,7 @@ namespace AntigravityCnSwitch
 
         private string EnsureRuntimeNode()
         {
+            EnsureEmbeddedPayloadExtracted();
             string runtimeDir = Path.Combine(_targetDir, "runtime");
             Directory.CreateDirectory(runtimeDir);
 

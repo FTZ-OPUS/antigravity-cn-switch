@@ -11,38 +11,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Windows App
+      - name: Build Standalone Windows Exe
         shell: pwsh
         run: ./windows/build_win.ps1
 
-      - name: Verify Windows Runtime & Patch Doctor
+      - name: Smoke Test Standalone Windows Exe
         shell: pwsh
         run: |
-          $OutDir = "dist/AntigravityCnSwitch-Windows"
-          $NodeExe = Join-Path $OutDir "runtime/node.exe"
-          $InstallJs = Join-Path $OutDir "patch/install.mjs"
-          & $NodeExe -v
-          & $NodeExe -e "import('node:sqlite').then(m => console.log('sqlite ok:', typeof m.DatabaseSync))"
-          & $NodeExe $InstallJs doctor
-          $ExePath = (Resolve-Path (Join-Path $OutDir "反重力汉化开关.exe")).Path
+          $ExePath = (Resolve-Path "dist/AntigravityCnSwitch-Windows/反重力汉化开关.exe").Path
+          $sizeMB = [math]::Round((Get-Item $ExePath).Length / 1MB, 2)
+          Write-Host "Standalone exe size: $sizeMB MB"
+          if ($sizeMB -lt 20) { throw "Exe unexpectedly small ($sizeMB MB) - embedded payload missing?" }
           $proc = Start-Process -FilePath $ExePath -PassThru
           Start-Sleep -Seconds 3
           if ($proc.HasExited) {
             throw "Windows app exited prematurely with code $($proc.ExitCode)"
           }
-          Write-Host "Windows GUI launched and stayed alive (PID $($proc.Id))"
+          Write-Host "Standalone Windows GUI launched and stayed alive (PID $($proc.Id))"
           Stop-Process -Id $proc.Id -Force
 
-      - name: Package Windows Zip
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist/AntigravityCnSwitch-Windows/*" -DestinationPath "dist/AntigravityCnSwitch-Windows-x64.zip" -Force
-
-      - name: Upload Windows Artifact
+      - name: Upload Windows Standalone Exe
         uses: actions/upload-artifact@v4
         with:
-          name: AntigravityCnSwitch-Windows-x64
-          path: dist/AntigravityCnSwitch-Windows-x64.zip
+          name: AntigravityCnSwitch-Windows-Exe
+          path: dist/AntigravityCnSwitch-Windows/反重力汉化开关.exe
 
   build-macos:
     runs-on: macos-latest
