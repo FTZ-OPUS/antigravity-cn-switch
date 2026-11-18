@@ -15,7 +15,7 @@ jobs:
         shell: pwsh
         run: ./windows/build_win.ps1
 
-      - name: Smoke Test Standalone Windows Exe
+      - name: Smoke Test Standalone Windows Exe & Fresh PC Install
         shell: pwsh
         run: |
           $ExePath = (Resolve-Path "dist/AntigravityCnSwitch-Windows/反重力汉化开关.exe").Path
@@ -29,6 +29,16 @@ jobs:
           }
           Write-Host "Standalone Windows GUI launched and stayed alive (PID $($proc.Id))"
           Stop-Process -Id $proc.Id -Force
+
+          # Simulate fresh Windows PC: ensure .antigravity/argv.json gets created and patch install/uninstall succeed
+          $HomeDir = $env:USERPROFILE
+          New-Item -ItemType Directory -Force -Path (Join-Path $HomeDir ".antigravity") | Out-Null
+          $CacheNode = (Resolve-Path ".cache/node.exe").Path
+          & $CacheNode --disable-warning=ExperimentalWarning "patch/install.mjs" install
+          $ArgvPath = Join-Path $HomeDir ".antigravity\argv.json"
+          if (-not (Test-Path $ArgvPath)) { throw "argv.json was not created on fresh Windows PC!" }
+          Write-Host "argv.json created: $(Get-Content $ArgvPath -Raw)"
+          & $CacheNode --disable-warning=ExperimentalWarning "patch/install.mjs" uninstall
 
       - name: Upload Windows Standalone Exe
         uses: actions/upload-artifact@v4

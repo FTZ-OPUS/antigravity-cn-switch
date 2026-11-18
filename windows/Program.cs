@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
@@ -152,7 +153,7 @@ namespace AntigravityCnSwitch
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(380, 410);
+            ClientSize = new Size(380, 420);
             BackColor = _warmPaper;
             Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Regular);
 
@@ -185,7 +186,7 @@ namespace AntigravityCnSwitch
             {
                 BackColor = _cardBg,
                 Location = new Point(20, 84),
-                Size = new Size(340, 128),
+                Size = new Size(340, 138),
                 BorderStyle = BorderStyle.FixedSingle
             };
 
@@ -229,8 +230,8 @@ namespace AntigravityCnSwitch
                 Text = "正在检测状态...",
                 Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular),
                 ForeColor = Color.FromArgb(100, 98, 94),
-                Location = new Point(16, 84),
-                Size = new Size(308, 34)
+                Location = new Point(16, 82),
+                Size = new Size(308, 48)
             };
             cardMain.Controls.Add(_lblStatusDesc);
 
@@ -240,7 +241,7 @@ namespace AntigravityCnSwitch
             var cardTheme = new Panel
             {
                 BackColor = _cardBg,
-                Location = new Point(20, 226),
+                Location = new Point(20, 236),
                 Size = new Size(340, 96),
                 BorderStyle = BorderStyle.FixedSingle
             };
@@ -292,7 +293,7 @@ namespace AntigravityCnSwitch
                 Text = "",
                 Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular),
                 ForeColor = Color.Firebrick,
-                Location = new Point(20, 328),
+                Location = new Point(20, 338),
                 Size = new Size(340, 38)
             };
             Controls.Add(_lblError);
@@ -303,8 +304,8 @@ namespace AntigravityCnSwitch
                 Text = "Antigravity 检测中...",
                 Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular),
                 ForeColor = Color.FromArgb(115, 112, 106),
-                Location = new Point(20, 376),
-                Size = new Size(190, 20)
+                Location = new Point(20, 386),
+                Size = new Size(200, 20)
             };
             Controls.Add(_lblAppStatus);
 
@@ -313,7 +314,7 @@ namespace AntigravityCnSwitch
                 Text = "下载推荐字体",
                 Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Regular),
                 LinkColor = _warmOrange,
-                Location = new Point(240, 376),
+                Location = new Point(240, 386),
                 Size = new Size(120, 20),
                 TextAlign = ContentAlignment.MiddleRight
             };
@@ -326,7 +327,7 @@ namespace AntigravityCnSwitch
 
         private void RefreshState()
         {
-            CheckEnvironmentOnly();
+            bool running = CheckEnvironmentOnly();
             var cfg = ReadUserConfig();
             bool cfgEnabled = cfg.ContainsKey("enabled") && cfg["enabled"] is bool && (bool)cfg["enabled"];
 
@@ -345,12 +346,25 @@ namespace AntigravityCnSwitch
             _toggle.Checked = active;
             _lblState.Text = active ? "已开启 · 中文界面 + 暖纸主题" : "已关闭 · 原版英文界面";
             _lblState.ForeColor = active ? _waxRed : Color.Gray;
-            _lblStatusDesc.Text = active
-                ? "已开启 · Antigravity 将自动显示中文界面与暖纸护眼主题"
-                : "已关闭 · Antigravity 保持原版英文界面";
+
+            if (active)
+            {
+                if (running && !IsAntigravityDebugPortReachable())
+                {
+                    _lblStatusDesc.Text = "已开启！检测到 Antigravity 在开启前已打开，请完全关闭并重启 Antigravity 即可生效。";
+                }
+                else
+                {
+                    _lblStatusDesc.Text = "已开启 · Antigravity 将自动显示中文界面与暖纸护眼主题";
+                }
+            }
+            else
+            {
+                _lblStatusDesc.Text = "已关闭 · Antigravity 保持原版英文界面";
+            }
         }
 
-        private void CheckEnvironmentOnly()
+        private bool CheckEnvironmentOnly()
         {
             bool running = Process.GetProcesses().Any(p =>
             {
@@ -380,6 +394,39 @@ namespace AntigravityCnSwitch
                 _lnkFonts.LinkColor = _warmOrange;
                 _lnkFonts.Enabled = true;
             }
+            return running;
+        }
+
+        private static bool IsAntigravityDebugPortReachable()
+        {
+            try
+            {
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                string[] candidates = {
+                    Path.Combine(appData, "Antigravity", "DevToolsActivePort"),
+                    Path.Combine(appData, "Antigravity - Insiders", "DevToolsActivePort")
+                };
+                foreach (var p in candidates)
+                {
+                    if (!File.Exists(p)) continue;
+                    string[] lines = File.ReadAllLines(p);
+                    int port;
+                    if (lines.Length > 0 && int.TryParse(lines[0].Trim(), out port) && port > 0)
+                    {
+                        using (var client = new TcpClient())
+                        {
+                            var ar = client.BeginConnect("127.0.0.1", port, null, null);
+                            if (ar.AsyncWaitHandle.WaitOne(250))
+                            {
+                                client.EndConnect(ar);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
         }
 
         private static bool HasFontInDir(string dir)
@@ -416,6 +463,7 @@ namespace AntigravityCnSwitch
 
                     if (targetState)
                     {
+                        EnsureArgvDirsExist();
                         UpdateUserConfig(cfg =>
                         {
                             cfg["enabled"] = true;
@@ -424,7 +472,10 @@ namespace AntigravityCnSwitch
                         });
                         var res = RunProcess(nodeExe, "--disable-warning=ExperimentalWarning \"" + installScript + "\" install");
                         if (res.Item1 != 0)
+                        {
+                            WriteLog("install failed: " + res.Item2);
                             throw new Exception(string.IsNullOrEmpty(res.Item2) ? "安装失败 (exit " + res.Item1 + ")" : res.Item2);
+                        }
                     }
                     else
                     {
@@ -432,7 +483,10 @@ namespace AntigravityCnSwitch
                         {
                             var res = RunProcess(nodeExe, "--disable-warning=ExperimentalWarning \"" + installScript + "\" uninstall");
                             if (res.Item1 != 0)
+                            {
+                                WriteLog("uninstall failed: " + res.Item2);
                                 throw new Exception(string.IsNullOrEmpty(res.Item2) ? "卸载失败 (exit " + res.Item1 + ")" : res.Item2);
+                            }
                         }
                         UpdateUserConfig(cfg => { cfg["enabled"] = false; });
                     }
@@ -447,6 +501,17 @@ namespace AntigravityCnSwitch
                 _toggle.Busy = false;
                 RefreshState();
             }
+        }
+
+        private void EnsureArgvDirsExist()
+        {
+            // Ensure ~/.antigravity exists even on a fresh Windows PC where Antigravity hasn't been opened yet,
+            // so install.mjs ensureArgvRemoteDebugging() always writes remote-debugging-port into argv.json.
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(_homeDir, ".antigravity"));
+            }
+            catch { }
         }
 
         private void OnPresetChanged()
@@ -537,10 +602,27 @@ namespace AntigravityCnSwitch
             var res = RunProcess("schtasks.exe", "/Query /TN AntigravityThemeDaemon");
             if (res.Item1 == 0) return true;
 
+            var regRes = RunProcess("reg.exe", @"query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v AntigravityThemeDaemon");
+            if (regRes.Item1 == 0) return true;
+
             string startupVbs = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.Startup),
                 "AntigravityThemeDaemon.vbs");
-            return File.Exists(startupVbs);
+            if (File.Exists(startupVbs)) return true;
+
+            try
+            {
+                foreach (var f in Directory.GetFiles(Path.GetTempPath(), "ag-theme-daemon-*.pid"))
+                {
+                    if (!File.Exists(f)) continue;
+                    string content = File.ReadAllText(f, Encoding.UTF8);
+                    if (content.IndexOf("\"stopRequested\":true", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private Dictionary<string, object> ReadUserConfig()
@@ -578,6 +660,16 @@ namespace AntigravityCnSwitch
                 var ser = new JavaScriptSerializer();
                 string json = ser.Serialize(cfg);
                 File.WriteAllText(_userConfigPath, json + "\n", new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private static void WriteLog(string msg)
+        {
+            try
+            {
+                string logPath = Path.Combine(Path.GetTempPath(), "antigravity-cn-switch.log");
+                File.AppendAllText(logPath, "[" + DateTime.Now.ToString("s") + "] " + msg + Environment.NewLine, Encoding.UTF8);
             }
             catch { }
         }
