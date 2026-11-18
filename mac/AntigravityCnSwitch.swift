@@ -167,9 +167,21 @@ final class PatchController: ObservableObject {
     // MARK: - Helpers
 
     private func resolveInstallScript() -> String {
-        let bundled = "\(bundledPatchDir)/install.mjs"
-        if fm.fileExists(atPath: bundled) {
-            return bundled
+        let bundledSrc = "\(bundledPatchDir)"
+        let localBundled = "\(targetDir)/bundled-patch"
+        if fm.fileExists(atPath: "\(bundledSrc)/install.mjs") {
+            let srcManifest = "\(bundledSrc)/core/manifest.json"
+            let dstManifest = "\(localBundled)/core/manifest.json"
+            let needCopy = !fm.fileExists(atPath: "\(localBundled)/install.mjs")
+                || (fm.contents(atPath: srcManifest) != fm.contents(atPath: dstManifest))
+            if needCopy {
+                try? fm.removeItem(atPath: localBundled)
+                try? fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
+                try? fm.copyItem(atPath: bundledSrc, toPath: localBundled)
+            }
+            if fm.fileExists(atPath: "\(localBundled)/install.mjs") {
+                return "\(localBundled)/install.mjs"
+            }
         }
         return "\(targetDir)/install.mjs"
     }
@@ -234,15 +246,25 @@ final class PatchController: ObservableObject {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launchPath)
         proc.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        proc.environment = env
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
         do {
             try proc.run()
-            proc.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let out = String(data: data, encoding: .utf8) ?? ""
-            return (proc.terminationStatus, out.trimmingCharacters(in: .whitespacesAndNewlines))
+            proc.waitUntilExit()
+            let out = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if proc.terminationStatus != 0 {
+                try? "[\(Date())] \(launchPath) \(args.joined(separator: " ")) -> exit \(proc.terminationStatus)\n\(out)\n".write(
+                    toFile: "/tmp/antigravity-cn-switch.log",
+                    atomically: true,
+                    encoding: .utf8
+                )
+            }
+            return (proc.terminationStatus, out)
         } catch {
             return (-1, error.localizedDescription)
         }
