@@ -15,46 +15,175 @@ jobs:
         shell: pwsh
         run: ./windows/build_win.ps1
 
-      - name: Smoke Test Standalone Windows Exe & Fresh PC Install
+      - name: Smoke Test Standalone Windows Exe & 3-Tool Coexistence (Antigravity + Patch + Antigravity Tools + CN Switch)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $ExePath = (Resolve-Path "dist/AntigravityCnSwitch-Windows/反重力汉化开关.exe").Path
           $sizeMB = [math]::Round((Get-Item $ExePath).Length / 1MB, 2)
           Write-Host "Standalone exe size: $sizeMB MB"
           if ($sizeMB -lt 20) { throw "Exe unexpectedly small ($sizeMB MB) - embedded payload missing?" }
-          $proc = Start-Process -FilePath $ExePath -PassThru
-          Start-Sleep -Seconds 3
+
+          $HomeDir = $env:USERPROFILE
+
+          # 1. Setup Mock Antigravity installation (patched by 反重力补丁.exe with proxy language_server + .orig.exe)
+          $AgDir = Join-Path $env:LOCALAPPDATA "Programs\Antigravity"
+          $AgBinDir = Join-Path $AgDir "resources\app\extensions\antigravity\bin"
+          New-Item -ItemType Directory -Force -Path $AgBinDir | Out-Null
+          $MockAgExe = Join-Path $AgDir "Antigravity.exe"
+          $LaunchLog = Join-Path $env:TEMP "mock-antigravity-launched.json"
+          if (Test-Path $LaunchLog) { Remove-Item -Force $LaunchLog }
+
+          $mockAgCs = @"
+          using System;
+          using System.IO;
+          using System.Threading;
+          class MockAg {
+              static void Main(string[] args) {
+                  string logPath = Path.Combine(Path.GetTempPath(), "mock-antigravity-launched.json");
+                  File.WriteAllText(logPath, string.Join(" ", args));
+                  Thread.Sleep(4000);
+              }
+          }
+          "@
+          $csc = Join-Path ([System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "csc.exe"
+          $mockAgSrc = Join-Path $env:TEMP "MockAg.cs"
+          Set-Content -Path $mockAgSrc -Value $mockAgCs -Encoding UTF8
+          & $csc /nologo /target:winexe /out:$MockAgExe $mockAgSrc
+          Copy-Item -Force $MockAgExe (Join-Path $AgBinDir "language_server_windows_x64.exe")
+          Copy-Item -Force $MockAgExe (Join-Path $AgBinDir "language_server_windows_x64.exe.orig.exe")
+
+          # 2. Setup Mock Antigravity Tools (antigravity-tools.exe) + poisoned gui_config.json + legacy theme-patch install
+          $MockToolsDir = Join-Path $env:TEMP "MockAgTools"
+          New-Item -ItemType Directory -Force -Path $MockToolsDir | Out-Null
+          $MockToolsExe = Join-Path $MockToolsDir "antigravity-tools.exe"
+          Copy-Item -Force $MockAgExe $MockToolsExe
+          $toolsProc = Start-Process -FilePath $MockToolsExe -PassThru
+
+          $AgToolsDataDir = Join-Path $HomeDir ".antigravity_tools"
+          New-Item -ItemType Directory -Force -Path $AgToolsDataDir | Out-Null
+          $GuiConfigPath = Join-Path $AgToolsDataDir "gui_config.json"
+          $LegacyDir = Join-Path $HomeDir ".gemini\antigravity\theme-patch"
+          $LegacyUserDir = Join-Path $LegacyDir "user"
+          $LegacyScriptsDir = Join-Path $HomeDir ".gemini\antigravity\scripts"
+          New-Item -ItemType Directory -Force -Path $LegacyUserDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $LegacyScriptsDir | Out-Null
+          Set-Content -Path (Join-Path $LegacyUserDir "config.json") -Value '{"enabled":true,"preset":"high-contrast","darkPreset":"onyx"}' -Encoding UTF8
+          Set-Content -Path (Join-Path $LegacyScriptsDir "antigravity-font-daemon.mjs") -Value '// legacy' -Encoding UTF8
+
+          # Simulate a previously poisoned gui_config.json pointing to the legacy node.exe
+          $poisonedCfg = @{
+            language = "zh-CN"
+            theme = "dark"
+            auto_refresh = $true
+            refresh_interval = 15
+            auto_sync = $false
+            sync_interval = 30
+            antigravity_executable = "$LegacyDir\runtime\node.exe"
+            antigravity_args = @()
+          } | ConvertTo-Json -Depth 4
+          Set-Content -Path $GuiConfigPath -Value $poisonedCfg -Encoding UTF8
+
+          # 3. Launch 反重力汉化开关.exe (copied to Desktop as user would run it)
+          $UserExePath = Join-Path ([Environment]::GetFolderPath('Desktop')) "反重力汉化开关.exe"
+          Copy-Item -Force $ExePath $UserExePath
+          $proc = Start-Process -FilePath $UserExePath -PassThru
+          Start-Sleep -Seconds 6
           if ($proc.HasExited) {
             throw "Windows app exited prematurely with code $($proc.ExitCode)"
           }
           Write-Host "Standalone Windows GUI launched and stayed alive (PID $($proc.Id))"
-          Stop-Process -Id $proc.Id -Force
 
-          # Verify shortcut patching logic on Windows Desktop .lnk
-          $wsh = New-Object -ComObject WScript.Shell
-          $testLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Antigravity.lnk'
-          $sc = $wsh.CreateShortcut($testLnk)
-          $sc.TargetPath = "$env:LOCALAPPDATA\Programs\antigravity\Antigravity.exe"
-          $sc.Save()
-          $sc2 = $wsh.CreateShortcut($testLnk)
-          if ($sc2.TargetPath -match 'Antigravity(\.exe|$)') {
-            $sc2.Arguments = ($sc2.Arguments + ' --remote-debugging-port=9222').Trim()
-            $sc2.Save()
+          # 4. Verify legacy migration & new install path (~/.gemini/ag-cn-theme)
+          $NewDir = Join-Path $HomeDir ".gemini\ag-cn-theme"
+          $NewWrapper = Join-Path $NewDir "scripts\ag-font-daemon.mjs"
+          if (Test-Path $LegacyDir) { throw "Legacy directory $LegacyDir was not cleaned up!" }
+          if (-not (Test-Path (Join-Path $NewDir "runtime\node.exe"))) { throw "New runtime\node.exe not extracted to $NewDir!" }
+          if (-not (Test-Path $NewWrapper)) { throw "New wrapper $NewWrapper was not created!" }
+          Write-Host "Legacy directory migrated and cleaned up; new path verified: $NewDir"
+
+          # 5. Verify gui_config.json auto-healing & --remote-debugging-port=9222 sync
+          $healedCfg = Get-Content -Path $GuiConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          Write-Host "Healed gui_config.json: $(Get-Content -Path $GuiConfigPath -Raw -Encoding UTF8)"
+          if ($healedCfg.antigravity_executable -ne $MockAgExe) {
+            throw "Poisoned antigravity_executable was not healed! Got: $($healedCfg.antigravity_executable)"
           }
-          $sc3 = $wsh.CreateShortcut($testLnk)
-          if ($sc3.Arguments -notmatch '--remote-debugging-port=9222') { throw "Shortcut patch test failed!" }
-          Write-Host "Shortcut patch verified: $($sc3.Arguments)"
-          Remove-Item -Force $testLnk
+          if ($healedCfg.antigravity_args -notcontains "--remote-debugging-port=9222") {
+            throw "--remote-debugging-port=9222 was not synced into gui_config.json antigravity_args!"
+          }
 
-          # Simulate fresh Windows PC: ensure .antigravity/argv.json gets created and patch install/uninstall succeed
-          $HomeDir = $env:USERPROFILE
-          New-Item -ItemType Directory -Force -Path (Join-Path $HomeDir ".antigravity") | Out-Null
+          # 6. Verify live running node.exe daemon is 100% invisible to Antigravity Tools process classifier
+          $pidFiles = Get-ChildItem -Path $env:TEMP -Filter "ag-theme-daemon-*.pid" -ErrorAction SilentlyContinue
+          if (-not $pidFiles) { throw "Theme daemon PID file not found in TEMP!" }
+          $daemonPid = [int]((Get-Content $pidFiles[0].FullName)[0].Trim())
+          $daemonWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $daemonPid"
+          if (-not $daemonWmi) { throw "Theme daemon process (PID $daemonPid) is not running!" }
+          Write-Host "Running theme daemon PID=$daemonPid"
+          Write-Host "  ExecutablePath: $($daemonWmi.ExecutablePath)"
+          Write-Host "  CommandLine:    $($daemonWmi.CommandLine)"
+
+          if ($daemonWmi.ExecutablePath -match "antigravity") {
+            throw "FATAL: Daemon ExecutablePath still contains 'antigravity': $($daemonWmi.ExecutablePath)"
+          }
+          if ($daemonWmi.CommandLine -match "antigravity") {
+            throw "FATAL: Daemon CommandLine still contains 'antigravity': $($daemonWmi.CommandLine)"
+          }
+          if ($daemonWmi.CommandLine -notmatch "max-old-space-size") {
+            throw "FATAL: Daemon CommandLine missing --max-old-space-size: $($daemonWmi.CommandLine)"
+          }
+
+          # Run exact Antigravity Tools (process.rs) classify_process + is_helper_process scan across ALL running processes
+          $allProcs = Get-CimInstance Win32_Process
+          foreach ($p in $allProcs) {
+            if ($p.ProcessId -eq $PID) { continue }
+            $pName = ("" + $p.Name).ToLowerInvariant()
+            $pExe = ("" + $p.ExecutablePath).ToLowerInvariant()
+            $pCmd = ("" + $p.CommandLine).ToLowerInvariant()
+            if (-not $pExe -and -not $pName) { continue }
+
+            # is_manager_or_tools_process
+            if ($pName -match "antigravity-tools|antigravity_tools|antigravity-manager" -or $pExe -match "antigravity-tools|antigravity_tools|antigravity-manager") {
+              continue
+            }
+            # is_helper_process (note: on Windows sysinfo refresh_processes leaves cmd empty!)
+            $isHelperNoCmd = ($pName -match "helper|plugin|renderer|gpu|crashpad|utility|audio|sandbox|language_server") -or ($pExe -match "crashpad|helper|language_server")
+            if ($isHelperNoCmd) { continue }
+
+            # classify_process
+            if ($pExe.Contains("antigravity") -or $pName.Contains("antigravity")) {
+              # Ensure it is NOT our node.exe daemon or 反重力汉化开关.exe
+              if ($p.ProcessId -eq $daemonPid -or $pName -match "node|反重力汉化开关") {
+                throw "Antigravity Tools classifier falsely matched $($p.Name) (PID $($p.ProcessId), Path=$($p.ExecutablePath)) as Antigravity client!"
+              }
+            }
+          }
+          Write-Host "Antigravity Tools process scan verified: 0 false positives while theme daemon + GUI are running!"
+
+          # 7. Simulate Antigravity Tools 'Switch Account & Jump In' (start_antigravity_with_fallback_path)
+          $targetExe = if ($healedCfg.antigravity_executable -and (Test-Path $healedCfg.antigravity_executable)) {
+            $healedCfg.antigravity_executable
+          } else {
+            throw "Antigravity Tools could not resolve target executable!"
+          }
+          $launchArgs = ($healedCfg.antigravity_args -join " ")
+          $launchedAg = Start-Process -FilePath $targetExe -ArgumentList $launchArgs -PassThru
+          Start-Sleep -Seconds 2
+          if (-not (Test-Path $LaunchLog)) {
+            throw "Antigravity.exe failed to launch when triggered by Antigravity Tools!"
+          }
+          $recordedArgs = Get-Content $LaunchLog -Raw
+          Write-Host "Antigravity.exe successfully launched by Antigravity Tools with args: $recordedArgs"
+          if ($recordedArgs -notmatch "--remote-debugging-port=9222") {
+            throw "Antigravity.exe launched without --remote-debugging-port=9222! Got: $recordedArgs"
+          }
+
+          # Cleanup test processes and uninstall daemon
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $toolsProc.Id -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $launchedAg.Id -Force -ErrorAction SilentlyContinue
+          Remove-Item -Force $UserExePath -ErrorAction SilentlyContinue
           $CacheNode = (Resolve-Path ".cache/node.exe").Path
-          & $CacheNode --disable-warning=ExperimentalWarning "patch/install.mjs" install
-          $ArgvPath = Join-Path $HomeDir ".antigravity\argv.json"
-          if (-not (Test-Path $ArgvPath)) { throw "argv.json was not created on fresh Windows PC!" }
-          Write-Host "argv.json created: $(Get-Content $ArgvPath -Raw)"
-          & $CacheNode --disable-warning=ExperimentalWarning "patch/install.mjs" uninstall
+          & $CacheNode --max-old-space-size=256 --disable-warning=ExperimentalWarning "patch/install.mjs" uninstall
 
       - name: Upload Windows Standalone Exe
         uses: actions/upload-artifact@v4

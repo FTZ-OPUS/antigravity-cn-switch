@@ -131,7 +131,7 @@ namespace AntigravityCnSwitch
         public MainForm()
         {
             _homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            _targetDir = Path.Combine(_homeDir, ".gemini", "antigravity", "theme-patch");
+            _targetDir = Path.Combine(_homeDir, ".gemini", "ag-cn-theme");
             _userConfigPath = Path.Combine(_targetDir, "user", "config.json");
             _runtimeNodePath = Path.Combine(_targetDir, "runtime", "node.exe");
             _appBaseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -140,6 +140,8 @@ namespace AntigravityCnSwitch
             _bundledPatchDir = Directory.Exists(localPatch) ? localPatch : Path.Combine(_targetDir, "bundled-patch");
             _bundledNodePath = File.Exists(localNode) ? localNode : _runtimeNodePath;
 
+            MigrateAndCleanupLegacyInstall();
+
             InitUI();
             RefreshState();
 
@@ -147,6 +149,70 @@ namespace AntigravityCnSwitch
             _pollTimer.Interval = 2500;
             _pollTimer.Tick += (s, e) => UpdateLiveStatusLabels();
             _pollTimer.Start();
+        }
+
+        private void MigrateAndCleanupLegacyInstall()
+        {
+            try
+            {
+                string legacyDir = Path.Combine(_homeDir, ".gemini", "antigravity", "theme-patch");
+                string legacyWrapper = Path.Combine(_homeDir, ".gemini", "antigravity", "scripts", "antigravity-font-daemon.mjs");
+                bool hadLegacy = Directory.Exists(legacyDir) || File.Exists(legacyWrapper);
+                if (!hadLegacy) return;
+
+                string legacyUserDir = Path.Combine(legacyDir, "user");
+                string targetUserDir = Path.Combine(_targetDir, "user");
+                if (Directory.Exists(legacyUserDir))
+                {
+                    Directory.CreateDirectory(targetUserDir);
+                    foreach (string name in new[] { "config.json", "custom.css", "custom.js", "i18n.override.json" })
+                    {
+                        string src = Path.Combine(legacyUserDir, name);
+                        string dst = Path.Combine(targetUserDir, name);
+                        if (File.Exists(src) && !File.Exists(dst))
+                        {
+                            try { File.Copy(src, dst, false); } catch { }
+                        }
+                    }
+                }
+
+                // Kill any legacy node.exe running from ~/.gemini/antigravity/theme-patch
+                foreach (var p in Process.GetProcessesByName("node"))
+                {
+                    try
+                    {
+                        if (p.MainModule != null &&
+                            p.MainModule.FileName.StartsWith(legacyDir, StringComparison.OrdinalIgnoreCase))
+                        {
+                            p.Kill();
+                            p.WaitForExit(1500);
+                        }
+                    }
+                    catch { }
+                }
+
+                try { if (File.Exists(legacyWrapper)) File.Delete(legacyWrapper); } catch { }
+                try { if (Directory.Exists(legacyDir)) Directory.Delete(legacyDir, true); } catch { }
+
+                // If user already had localization enabled on legacy version, seamlessly re-install into new path
+                var cfg = ReadUserConfig();
+                bool cfgEnabled = cfg.ContainsKey("enabled") && cfg["enabled"] is bool && (bool)cfg["enabled"];
+                if (cfgEnabled)
+                {
+                    string nodeExe = EnsureRuntimeNode();
+                    string installScript = ResolveInstallScript();
+                    PatchAntigravityToolsConfig(true);
+                    RunProcess(nodeExe, "--max-old-space-size=256 --disable-warning=ExperimentalWarning \"" + installScript + "\" install");
+                    if (!IsDaemonActuallyRunning())
+                    {
+                        StartDaemonDirectlyIfPresent();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog("MigrateAndCleanupLegacyInstall error: " + ex.Message);
+            }
         }
 
         private void InitUI()
@@ -373,10 +439,14 @@ namespace AntigravityCnSwitch
             bool daemonAlive = IsDaemonActuallyRunning();
             bool portReachable = running && IsAntigravityDebugPortReachable();
 
-            if (_toggle.Checked && !daemonAlive && !_toggle.Busy)
+            if (_toggle.Checked && !_toggle.Busy)
             {
-                StartDaemonDirectlyIfPresent();
-                daemonAlive = IsDaemonActuallyRunning();
+                PatchAntigravityToolsConfig(true);
+                if (!daemonAlive)
+                {
+                    StartDaemonDirectlyIfPresent();
+                    daemonAlive = IsDaemonActuallyRunning();
+                }
             }
 
             _lblAppStatus.Text = running
@@ -486,17 +556,87 @@ namespace AntigravityCnSwitch
             }
         }
 
-        private static Process[] GetAntigravityProcesses()
+        private static bool IsRealAntigravityClientProcess(Process p)
         {
-            return Process.GetProcesses().Where(p =>
+            try
             {
+                string name = (p.ProcessName ?? "").Trim();
+                if (string.IsNullOrEmpty(name)) return false;
+
+                string lower = name.ToLowerInvariant();
+                if (!lower.Contains("antigravity")) return false;
+
+                string[] excludedTokens = {
+                    "tool", "manager", "cnswitch", "switch", "patch",
+                    "helper", "crashpad", "language_server", "updater",
+                    "setup", "install", "汉化", "补丁", "工具"
+                };
+                foreach (var token in excludedTokens)
+                {
+                    if (lower.Contains(token)) return false;
+                }
+
+                bool exactClientName =
+                    lower == "antigravity" ||
+                    lower == "antigravity ide" ||
+                    lower == "antigravity - insiders" ||
+                    lower == "antigravity-ide" ||
+                    lower == "antigravity_ide";
+                if (!exactClientName) return false;
+
                 try
                 {
-                    return p.ProcessName.IndexOf("Antigravity", StringComparison.OrdinalIgnoreCase) >= 0
-                        && p.ProcessName.IndexOf("CnSwitch", StringComparison.OrdinalIgnoreCase) < 0;
+                    if (p.MainModule != null && !string.IsNullOrEmpty(p.MainModule.FileName))
+                    {
+                        string exeLower = p.MainModule.FileName.ToLowerInvariant();
+                        if (exeLower.Contains("antigravity-tools") ||
+                            exeLower.Contains("antigravity_tools") ||
+                            exeLower.Contains("antigravity tools") ||
+                            exeLower.Contains("antigravity-manager") ||
+                            exeLower.Contains("cnswitch") ||
+                            exeLower.Contains("theme-patch") ||
+                            exeLower.Contains("ag-cn-theme"))
+                        {
+                            return false;
+                        }
+                    }
                 }
-                catch { return false; }
-            }).ToArray();
+                catch { }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static Process[] GetAntigravityProcesses()
+        {
+            return Process.GetProcesses().Where(IsRealAntigravityClientProcess).ToArray();
+        }
+
+        private static string FindStandardAntigravityExe()
+        {
+            try
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                string[] candidates = {
+                    Path.Combine(localAppData, "Programs", "Antigravity", "Antigravity.exe"),
+                    Path.Combine(localAppData, "Antigravity", "Antigravity.exe"),
+                    Path.Combine(pf, "Antigravity", "Antigravity.exe"),
+                    Path.Combine(pf86, "Antigravity", "Antigravity.exe")
+                };
+                foreach (var c in candidates)
+                {
+                    if (!string.IsNullOrEmpty(c) && File.Exists(c))
+                        return c;
+                }
+            }
+            catch { }
+            return null;
         }
 
         private async void OnRestartAntigravityClicked(object sender, EventArgs e)
@@ -519,6 +659,10 @@ namespace AntigravityCnSwitch
                                 exePath = p.MainModule.FileName;
                         }
                         catch { }
+                    }
+                    if (string.IsNullOrEmpty(exePath))
+                    {
+                        exePath = FindStandardAntigravityExe();
                     }
 
                     foreach (var p in procs)
@@ -632,13 +776,14 @@ namespace AntigravityCnSwitch
                     {
                         EnsureArgvDirsExist();
                         PatchAntigravityShortcuts(true);
+                        PatchAntigravityToolsConfig(true);
                         UpdateUserConfig(cfg =>
                         {
                             cfg["enabled"] = true;
                             cfg["preset"] = dayKey;
                             cfg["darkPreset"] = nightKey;
                         });
-                        var res = RunProcess(nodeExe, "--disable-warning=ExperimentalWarning \"" + installScript + "\" install");
+                        var res = RunProcess(nodeExe, "--max-old-space-size=256 --disable-warning=ExperimentalWarning \"" + installScript + "\" install");
                         if (res.Item1 != 0)
                         {
                             WriteLog("install failed: " + res.Item2);
@@ -652,9 +797,10 @@ namespace AntigravityCnSwitch
                     else
                     {
                         PatchAntigravityShortcuts(false);
+                        PatchAntigravityToolsConfig(false);
                         if (File.Exists(installScript))
                         {
-                            var res = RunProcess(nodeExe, "--disable-warning=ExperimentalWarning \"" + installScript + "\" uninstall");
+                            var res = RunProcess(nodeExe, "--max-old-space-size=256 --disable-warning=ExperimentalWarning \"" + installScript + "\" uninstall");
                             if (res.Item1 != 0)
                             {
                                 WriteLog("uninstall failed: " + res.Item2);
@@ -705,7 +851,7 @@ namespace AntigravityCnSwitch
                     "  Get-ChildItem -Path $d -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue | ForEach-Object { " +
                     "    try { " +
                     "      $sc = $wsh.CreateShortcut($_.FullName); " +
-                    "      if ($sc.TargetPath -match 'Antigravity(\\.exe|$)') { " +
+                    "      if ($sc.TargetPath -match 'Antigravity(\\.exe|$)' -and $sc.TargetPath -notmatch 'Tools|Manager|CnSwitch') { " +
                     "        $args = if ($sc.Arguments) { $sc.Arguments } else { '' }; " +
                     "        $port = if ($sc.TargetPath -match 'Insiders') { '9223' } else { '9222' }; " +
                     (enable
@@ -725,6 +871,121 @@ namespace AntigravityCnSwitch
             }
         }
 
+        private static bool IsPoisonedAntigravityPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            string lower = path.ToLowerInvariant();
+            return lower.EndsWith("node.exe") ||
+                   lower.Contains("theme-patch") ||
+                   lower.Contains("ag-cn-theme") ||
+                   lower.Contains("cnswitch") ||
+                   lower.Contains("反重力汉化") ||
+                   lower.Contains("反重力补丁");
+        }
+
+        private void PatchAntigravityToolsConfig(bool enable)
+        {
+            try
+            {
+                var candidateDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    Path.Combine(_homeDir, ".antigravity_tools")
+                };
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                string[] pointerFiles = {
+                    Path.Combine(appData, "antigravity-tools", "data_dir_location.txt"),
+                    Path.Combine(_homeDir, ".antigravity_tools_location")
+                };
+                foreach (var ptr in pointerFiles)
+                {
+                    try
+                    {
+                        if (File.Exists(ptr))
+                        {
+                            string customDir = File.ReadAllText(ptr, Encoding.UTF8).Trim();
+                            if (!string.IsNullOrEmpty(customDir))
+                                candidateDirs.Add(customDir);
+                        }
+                    }
+                    catch { }
+                }
+
+                var ser = new JavaScriptSerializer();
+                foreach (var dir in candidateDirs)
+                {
+                    string cfgPath = Path.Combine(dir, "gui_config.json");
+                    if (!File.Exists(cfgPath)) continue;
+
+                    string raw = File.ReadAllText(cfgPath, Encoding.UTF8).TrimStart('\uFEFF');
+                    var cfg = ser.Deserialize<Dictionary<string, object>>(raw);
+                    if (cfg == null) continue;
+
+                    bool changed = false;
+                    if (cfg.ContainsKey("antigravity_executable") && cfg["antigravity_executable"] is string)
+                    {
+                        string curExe = (string)cfg["antigravity_executable"];
+                        if (IsPoisonedAntigravityPath(curExe))
+                        {
+                            cfg["antigravity_executable"] = FindStandardAntigravityExe();
+                            changed = true;
+                        }
+                    }
+                    if (cfg.ContainsKey("antigravity_ide_executable") && cfg["antigravity_ide_executable"] is string)
+                    {
+                        string curIdeExe = (string)cfg["antigravity_ide_executable"];
+                        if (IsPoisonedAntigravityPath(curIdeExe))
+                        {
+                            cfg["antigravity_ide_executable"] = null;
+                            changed = true;
+                        }
+                    }
+
+                    var argList = new List<string>();
+                    if (cfg.ContainsKey("antigravity_args") && cfg["antigravity_args"] != null)
+                    {
+                        var enumerable = cfg["antigravity_args"] as System.Collections.IEnumerable;
+                        if (enumerable != null && !(cfg["antigravity_args"] is string))
+                        {
+                            foreach (var item in enumerable)
+                            {
+                                if (item != null) argList.Add(item.ToString());
+                            }
+                        }
+                    }
+
+                    if (enable)
+                    {
+                        bool hasPort = argList.Any(a => a.Trim().StartsWith("--remote-debugging-port=", StringComparison.OrdinalIgnoreCase));
+                        if (!hasPort)
+                        {
+                            argList.Add("--remote-debugging-port=9222");
+                            cfg["antigravity_args"] = argList;
+                            changed = true;
+                        }
+                    }
+                    else
+                    {
+                        int before = argList.Count;
+                        argList.RemoveAll(a => a.Trim().StartsWith("--remote-debugging-port=", StringComparison.OrdinalIgnoreCase));
+                        if (argList.Count != before)
+                        {
+                            cfg["antigravity_args"] = argList;
+                            changed = true;
+                        }
+                    }
+
+                    if (changed)
+                    {
+                        File.WriteAllText(cfgPath, ser.Serialize(cfg) + "\n", new UTF8Encoding(false));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog("PatchAntigravityToolsConfig failed: " + ex.Message);
+            }
+        }
+
         private void StartDaemonDirectlyIfPresent()
         {
             try
@@ -734,7 +995,7 @@ namespace AntigravityCnSwitch
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = _runtimeNodePath,
-                    Arguments = "--disable-warning=ExperimentalWarning \"" + daemonJs + "\"",
+                    Arguments = "--max-old-space-size=256 --disable-warning=ExperimentalWarning \"" + daemonJs + "\"",
                     UseShellExecute = false,
                     CreateNoWindow = true
                 });

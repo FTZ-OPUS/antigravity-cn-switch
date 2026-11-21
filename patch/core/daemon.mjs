@@ -762,7 +762,11 @@ function checkDaemonPidState(pid, recordedStartMs = 0) {
         if (cmdMatch) {
           const cmdLine = cmdMatch[1].trim().toLowerCase();
           if (cmdLine) {
-            if (cmdLine.includes('daemon.mjs') || cmdLine.includes('antigravity-font-daemon')) {
+            if (
+              cmdLine.includes('daemon.mjs') ||
+              cmdLine.includes('antigravity-font-daemon') ||
+              cmdLine.includes('ag-font-daemon')
+            ) {
               return 'confirmed';
             }
             return 'not_daemon';
@@ -3193,6 +3197,110 @@ function ensureZhTitlePatchIfPresent() {
 }
 
 const fallbackBackoffUntil = new Map();
+let lastAgToolsSyncSig = '';
+
+function findStandardAntigravityExe() {
+  if (process.platform !== 'win32') return null;
+  const home = os.homedir();
+  const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const pf = process.env.ProgramFiles || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const candidates = [
+    path.join(localAppData, 'Programs', 'Antigravity', 'Antigravity.exe'),
+    path.join(localAppData, 'Antigravity', 'Antigravity.exe'),
+    path.join(pf, 'Antigravity', 'Antigravity.exe'),
+    path.join(pf86, 'Antigravity', 'Antigravity.exe')
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {}
+  }
+  return null;
+}
+
+function isPoisonedExecutablePath(p) {
+  if (!p || typeof p !== 'string') return false;
+  const lower = p.toLowerCase();
+  return (
+    lower.endsWith('node.exe') ||
+    lower.endsWith('/node') ||
+    lower.endsWith('\\node') ||
+    lower.includes('theme-patch') ||
+    lower.includes('ag-cn-theme') ||
+    lower.includes('cnswitch') ||
+    lower.includes('反重力汉化') ||
+    lower.includes('反重力补丁')
+  );
+}
+
+function syncAntigravityToolsGuiConfig(enabled = true) {
+  try {
+    const home = os.homedir();
+    const dirs = new Set([path.join(home, '.antigravity_tools')]);
+    const legacyPtr = path.join(home, '.antigravity_tools_location');
+    const appData =
+      process.platform === 'win32'
+        ? process.env.APPDATA || path.join(home, 'AppData', 'Roaming')
+        : process.platform === 'darwin'
+        ? path.join(home, 'Library', 'Application Support')
+        : process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    const modernPtr = path.join(appData, 'antigravity-tools', 'data_dir_location.txt');
+    for (const ptr of [modernPtr, legacyPtr]) {
+      try {
+        if (fs.existsSync(ptr)) {
+          const customDir = fs.readFileSync(ptr, 'utf8').trim();
+          if (customDir) dirs.add(customDir);
+        }
+      } catch {}
+    }
+
+    for (const d of dirs) {
+      const cfgPath = path.join(d, 'gui_config.json');
+      if (!fs.existsSync(cfgPath)) continue;
+      const st = fs.statSync(cfgPath);
+      const sig = `${cfgPath}:${st.mtimeMs}:${enabled}`;
+      if (sig === lastAgToolsSyncSig) continue;
+
+      const raw = fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, '');
+      const cfg = JSON.parse(raw);
+      if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) continue;
+
+      let changed = false;
+      if (isPoisonedExecutablePath(cfg.antigravity_executable)) {
+        cfg.antigravity_executable = findStandardAntigravityExe();
+        changed = true;
+      }
+      if (isPoisonedExecutablePath(cfg.antigravity_ide_executable)) {
+        cfg.antigravity_ide_executable = null;
+        changed = true;
+      }
+
+      const rawArgs = Array.isArray(cfg.antigravity_args)
+        ? cfg.antigravity_args.filter((a) => typeof a === 'string')
+        : [];
+      if (enabled) {
+        const hasPort = rawArgs.some((a) => a.trim().toLowerCase().startsWith('--remote-debugging-port='));
+        if (!hasPort) {
+          cfg.antigravity_args = [...rawArgs, '--remote-debugging-port=9222'];
+          changed = true;
+        }
+      } else {
+        const filtered = rawArgs.filter((a) => !a.trim().toLowerCase().startsWith('--remote-debugging-port='));
+        if (filtered.length !== rawArgs.length) {
+          cfg.antigravity_args = filtered;
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+      }
+      const newSt = fs.statSync(cfgPath);
+      lastAgToolsSyncSig = `${cfgPath}:${newSt.mtimeMs}:${enabled}`;
+    }
+  } catch {}
+}
 
 async function sync() {
   checkPidFileOwnership();
@@ -3202,6 +3310,9 @@ async function sync() {
   try {
     if (syncTickCount % 12 === 1) ensureZhTitlePatchIfPresent();
     const bundleChanged = rebuildBundleIfNeeded();
+    if (RUN_ONCE || bundleChanged || syncTickCount % 4 === 1) {
+      syncAntigravityToolsGuiConfig(Boolean(activeConfig.enabled));
+    }
     if (!activeConfig.enabled) {
       targetThemeModes.clear();
     }

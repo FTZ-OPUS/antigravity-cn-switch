@@ -85,6 +85,10 @@ function isSameTargetPath(a, b) {
 }
 
 function resolveGlobalInstallDir() {
+  return path.join(os.homedir(), '.gemini', 'ag-cn-theme');
+}
+
+function resolveLegacyGlobalInstallDir() {
   return path.join(os.homedir(), '.gemini', 'antigravity', 'theme-patch');
 }
 
@@ -93,7 +97,141 @@ function resolveDefaultTargetDir() {
   if (fs.existsSync(path.join(installed, 'core', 'daemon.mjs'))) {
     return installed;
   }
+  const legacy = resolveLegacyGlobalInstallDir();
+  if (fs.existsSync(path.join(legacy, 'core', 'daemon.mjs'))) {
+    return legacy;
+  }
   return __dirname;
+}
+
+function findStandardAntigravityExe() {
+  if (process.platform !== 'win32') return null;
+  const home = os.homedir();
+  const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const pf = process.env.ProgramFiles || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const candidates = [
+    path.join(localAppData, 'Programs', 'Antigravity', 'Antigravity.exe'),
+    path.join(localAppData, 'Antigravity', 'Antigravity.exe'),
+    path.join(pf, 'Antigravity', 'Antigravity.exe'),
+    path.join(pf86, 'Antigravity', 'Antigravity.exe')
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {}
+  }
+  return null;
+}
+
+function isPoisonedExecutablePath(p) {
+  if (!p || typeof p !== 'string') return false;
+  const lower = p.toLowerCase();
+  return (
+    lower.endsWith('node.exe') ||
+    lower.endsWith('/node') ||
+    lower.endsWith('\\node') ||
+    lower.includes('theme-patch') ||
+    lower.includes('ag-cn-theme') ||
+    lower.includes('cnswitch') ||
+    lower.includes('反重力汉化') ||
+    lower.includes('反重力补丁')
+  );
+}
+
+function syncAntigravityToolsGuiConfig(enabled = true) {
+  try {
+    const home = os.homedir();
+    const dirs = new Set([path.join(home, '.antigravity_tools')]);
+    const legacyPtr = path.join(home, '.antigravity_tools_location');
+    const appData =
+      process.platform === 'win32'
+        ? process.env.APPDATA || path.join(home, 'AppData', 'Roaming')
+        : process.platform === 'darwin'
+        ? path.join(home, 'Library', 'Application Support')
+        : process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    const modernPtr = path.join(appData, 'antigravity-tools', 'data_dir_location.txt');
+    for (const ptr of [modernPtr, legacyPtr]) {
+      try {
+        if (fs.existsSync(ptr)) {
+          const customDir = fs.readFileSync(ptr, 'utf8').trim();
+          if (customDir) dirs.add(customDir);
+        }
+      } catch {}
+    }
+
+    for (const d of dirs) {
+      const cfgPath = path.join(d, 'gui_config.json');
+      if (!fs.existsSync(cfgPath)) continue;
+      const raw = fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, '');
+      const cfg = JSON.parse(raw);
+      if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) continue;
+
+      let changed = false;
+      if (isPoisonedExecutablePath(cfg.antigravity_executable)) {
+        cfg.antigravity_executable = findStandardAntigravityExe();
+        changed = true;
+      }
+      if (isPoisonedExecutablePath(cfg.antigravity_ide_executable)) {
+        cfg.antigravity_ide_executable = null;
+        changed = true;
+      }
+
+      const rawArgs = Array.isArray(cfg.antigravity_args)
+        ? cfg.antigravity_args.filter((a) => typeof a === 'string')
+        : [];
+      if (enabled) {
+        const hasPort = rawArgs.some((a) => a.trim().toLowerCase().startsWith('--remote-debugging-port='));
+        if (!hasPort) {
+          cfg.antigravity_args = [...rawArgs, '--remote-debugging-port=9222'];
+          changed = true;
+        }
+      } else {
+        const filtered = rawArgs.filter((a) => !a.trim().toLowerCase().startsWith('--remote-debugging-port='));
+        if (filtered.length !== rawArgs.length) {
+          cfg.antigravity_args = filtered;
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+      }
+    }
+  } catch {}
+}
+
+function migrateAndCleanupLegacyInstallDir(targetDir) {
+  try {
+    const legacyDir = resolveLegacyGlobalInstallDir();
+    if (!fs.existsSync(legacyDir) || isSameTargetPath(targetDir, legacyDir)) return;
+    const legacyUserDir = path.join(legacyDir, 'user');
+    const targetUserDir = path.join(targetDir, 'user');
+    if (fs.existsSync(legacyUserDir)) {
+      fs.mkdirSync(targetUserDir, { recursive: true });
+      for (const item of ['config.json', 'custom.css', 'custom.js', 'i18n.override.json']) {
+        const s = path.join(legacyUserDir, item);
+        const d = path.join(targetUserDir, item);
+        if (fs.existsSync(s) && !fs.existsSync(d)) {
+          fs.copyFileSync(s, d);
+        }
+      }
+    }
+    const legacyWrapper = path.join(os.homedir(), '.gemini', 'antigravity', 'scripts', 'antigravity-font-daemon.mjs');
+    if (fs.existsSync(legacyWrapper)) {
+      try {
+        fs.unlinkSync(legacyWrapper);
+      } catch {}
+    }
+    const curDir = canonicalPath(__dirname).toLowerCase();
+    const curExec = canonicalPath(process.execPath).toLowerCase();
+    const legCanon = canonicalPath(legacyDir).toLowerCase();
+    if (!curDir.startsWith(legCanon) && !curExec.startsWith(legCanon)) {
+      try {
+        fs.rmSync(legacyDir, { recursive: true, force: true });
+      } catch {}
+    }
+  } catch {}
 }
 
 // ============================================================================
@@ -868,7 +1006,11 @@ function checkDaemonPidState(pid, recordedStartMs = 0) {
         if (cmdMatch) {
           const cmdLine = cmdMatch[1].trim().toLowerCase();
           if (cmdLine) {
-            if (cmdLine.includes('daemon.mjs') || cmdLine.includes('antigravity-font-daemon')) {
+            if (
+              cmdLine.includes('daemon.mjs') ||
+              cmdLine.includes('antigravity-font-daemon') ||
+              cmdLine.includes('ag-font-daemon')
+            ) {
               return 'confirmed';
             }
             return 'not_daemon';
@@ -975,6 +1117,7 @@ function registerSystemService(targetDir, wrapperDaemon) {
     <key>ProgramArguments</key>
     <array>
         <string>${process.execPath}</string>
+        <string>--max-old-space-size=256</string>
         <string>--disable-warning=ExperimentalWarning</string>
         <string>${wrapperDaemon}</string>
     </array>
@@ -1059,7 +1202,7 @@ Description=Chuanban Antigravity Theme & Live Metrics Daemon
 After=default.target
 
 [Service]
-ExecStart="${process.execPath}" --disable-warning=ExperimentalWarning "${wrapperDaemon}"
+ExecStart="${process.execPath}" --max-old-space-size=256 --disable-warning=ExperimentalWarning "${wrapperDaemon}"
 Restart=always
 RestartSec=3
 
@@ -1079,7 +1222,7 @@ WantedBy=default.target
     const startupDir = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
     const vbsFile = path.join(startupDir, 'AntigravityThemeDaemon.vbs');
     const localVbsFile = path.join(targetDir, 'AntigravityThemeDaemon.vbs');
-    const cmd = `""${process.execPath}"" --disable-warning=ExperimentalWarning ""${wrapperDaemon}""`;
+    const cmd = `""${process.execPath}"" --max-old-space-size=256 --disable-warning=ExperimentalWarning ""${wrapperDaemon}""`;
     const vbsContent = `\uFEFFSet WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run "${cmd}", 0, False\r\n`;
     try {
       // 使用 UTF-16LE (带 BOM) 写入本地启动跳板 VBS，彻底兼容 Windows 中文用户名路径 (wscript.exe 原生支持 UTF-16LE)
@@ -1256,11 +1399,15 @@ WantedBy=default.target
     let spawnedPid = null;
     if (!scheduledTaskStarted) {
       try {
-        const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', wrapperDaemon], {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true
-        });
+        const child = spawn(
+          process.execPath,
+          ['--max-old-space-size=256', '--disable-warning=ExperimentalWarning', wrapperDaemon],
+          {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true
+          }
+        );
         child.unref();
         spawnedPid = child.pid || null;
       } catch {}
@@ -1306,6 +1453,10 @@ async function runInstall() {
   const targetPrev = path.join(targetDir, 'core.prev');
   const backupsDir = path.join(targetDir, 'backups');
   const targetUser = path.join(targetDir, 'user');
+
+  if (!isCustomSandboxTarget) {
+    migrateAndCleanupLegacyInstallDir(targetDir);
+  }
 
   let backupCreated = null;
   let userBackupCreated = null;
@@ -1418,13 +1569,14 @@ async function runInstall() {
   let serviceInfo = { skipped: true, reason: 'custom-target-dir' };
 
   if (!isCustomSandboxTarget) {
-    // 自动检查并修补 ~/.antigravity/argv.json (remote-debugging-port)
+    // 自动检查并修补 ~/.antigravity/argv.json (remote-debugging-port) 及 Antigravity Tools gui_config.json
     argvStatus = ensureArgvRemoteDebugging(currentCfg.channel);
+    syncAntigravityToolsGuiConfig(true);
 
-    // 创建兼容包装脚本 ~/.gemini/antigravity/scripts/antigravity-font-daemon.mjs（使用 pathToFileURL 兼容 Windows C:\ 路径）
-    const scriptsDir = path.join(os.homedir(), '.gemini', 'antigravity', 'scripts');
+    // 创建兼容包装脚本 ~/.gemini/ag-cn-theme/scripts/ag-font-daemon.mjs（避免路径含 antigravity 触发第三方管理器进程误判）
+    const scriptsDir = path.join(os.homedir(), '.gemini', 'ag-cn-theme', 'scripts');
     fs.mkdirSync(scriptsDir, { recursive: true });
-    const wrapperDaemon = path.join(scriptsDir, 'antigravity-font-daemon.mjs');
+    const wrapperDaemon = path.join(scriptsDir, 'ag-font-daemon.mjs');
     const realDaemonUrl = pathToFileURL(realDaemon).href;
     fs.writeFileSync(
       wrapperDaemon,
@@ -1436,7 +1588,7 @@ async function runInstall() {
     serviceInfo = registerSystemService(targetDir, wrapperDaemon);
 
     // 立即执行一次 --once 同步注入
-    spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', realDaemon, '--once'], {
+    spawnSync(process.execPath, ['--max-old-space-size=256', '--disable-warning=ExperimentalWarning', realDaemon, '--once'], {
       stdio: 'inherit'
     });
   }
@@ -1528,7 +1680,7 @@ async function runRollback() {
 
   // 重启守护进程并立即执行一次 --once 重新注入（沙箱 --target-dir 隔离模式下跳过全局服务干预）
   const realDaemon = path.join(targetCore, 'daemon.mjs');
-  const wrapperDaemon = path.join(os.homedir(), '.gemini', 'antigravity', 'scripts', 'antigravity-font-daemon.mjs');
+  const wrapperDaemon = path.join(os.homedir(), '.gemini', 'ag-cn-theme', 'scripts', 'ag-font-daemon.mjs');
   if (!isCustomSandboxTarget) {
     if (process.platform === 'darwin') {
       const uid = process.getuid ? process.getuid() : 501;
@@ -1551,16 +1703,20 @@ async function runRollback() {
       } catch {}
       if (!restartedViaTask) {
         try {
-          const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', fs.existsSync(wrapperDaemon) ? wrapperDaemon : realDaemon], {
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: true
-          });
+          const child = spawn(
+            process.execPath,
+            ['--max-old-space-size=256', '--disable-warning=ExperimentalWarning', fs.existsSync(wrapperDaemon) ? wrapperDaemon : realDaemon],
+            {
+              detached: true,
+              stdio: 'ignore',
+              windowsHide: true
+            }
+          );
           child.unref();
         } catch {}
       }
     }
-    spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', realDaemon, '--once'], {
+    spawnSync(process.execPath, ['--max-old-space-size=256', '--disable-warning=ExperimentalWarning', realDaemon, '--once'], {
       stdio: 'inherit'
     });
   }
@@ -1788,6 +1944,7 @@ async function runUninstall() {
     } catch {}
   }
   stopRunningDaemonProcesses();
+  syncAntigravityToolsGuiConfig(false);
 
   // 2. 在无后台守护进程干扰的纯净状态下，向打开的窗口发送一次禁用还原载荷，即时卸载样式并恢复英文原貌
   if (fs.existsSync(userConfigPath) && fs.existsSync(realDaemon)) {

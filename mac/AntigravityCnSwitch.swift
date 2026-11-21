@@ -46,7 +46,8 @@ final class PatchController: ObservableObject {
     private var timer: Timer?
 
     private var homeDir: String { fm.homeDirectoryForCurrentUser.path }
-    private var targetDir: String { "\(homeDir)/.gemini/antigravity/theme-patch" }
+    private var targetDir: String { "\(homeDir)/.gemini/ag-cn-theme" }
+    private var legacyTargetDir: String { "\(homeDir)/.gemini/antigravity/theme-patch" }
     private var userConfigPath: String { "\(targetDir)/user/config.json" }
     private var runtimeNodePath: String { "\(targetDir)/runtime/node" }
     private var plistPath: String { "\(homeDir)/Library/LaunchAgents/com.antigravity.theme.plist" }
@@ -58,6 +59,7 @@ final class PatchController: ObservableObject {
     private var bundledNodePath: String { "\(bundledResourcesDir)/runtime/node" }
 
     init() {
+        migrateLegacyConfigIfNeeded()
         refreshState()
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             self?.checkEnvironmentOnly()
@@ -138,11 +140,31 @@ final class PatchController: ObservableObject {
         return "⚠️ 已连接 Antigravity，但尚未检测到汉化注入（词条: \(dictCount)）"
     }
 
+    private func migrateLegacyConfigIfNeeded() {
+        let legacyUser = "\(legacyTargetDir)/user"
+        let newUser = "\(targetDir)/user"
+        if fm.fileExists(atPath: legacyUser) && !fm.fileExists(atPath: userConfigPath) {
+            try? fm.createDirectory(atPath: newUser, withIntermediateDirectories: true)
+            for item in ["config.json", "custom.css", "custom.js", "i18n.override.json"] {
+                let s = "\(legacyUser)/\(item)"
+                let d = "\(newUser)/\(item)"
+                if fm.fileExists(atPath: s) && !fm.fileExists(atPath: d) {
+                    try? fm.copyItem(atPath: s, toPath: d)
+                }
+            }
+        }
+    }
+
     private func checkEnvironmentOnly() {
         let running = NSWorkspace.shared.runningApplications.contains { app in
             let name = app.localizedName ?? ""
             let bid = app.bundleIdentifier ?? ""
-            return name.localizedCaseInsensitiveContains("Antigravity") && !bid.contains("antigravity-cn-switch")
+            return name.localizedCaseInsensitiveContains("Antigravity")
+                && !name.localizedCaseInsensitiveContains("Tools")
+                && !name.localizedCaseInsensitiveContains("Manager")
+                && !bid.contains("antigravity-cn-switch")
+                && !bid.contains("antigravity-tools")
+                && !bid.contains("antigravity.tools")
         }
         antigravityRunning = running
 
