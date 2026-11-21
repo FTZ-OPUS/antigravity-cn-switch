@@ -218,6 +218,7 @@ namespace AntigravityCnSwitch
         private void InitUI()
         {
             Text = "反重力汉化开关";
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;

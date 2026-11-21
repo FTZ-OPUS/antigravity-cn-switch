@@ -51,6 +51,7 @@ Write-Host "Compiling standalone single-file Windows exe -> $ExeOut"
     /optimize+ `
     /target:winexe `
     /utf8output `
+    "/win32icon:$WinDir\app.ico" `
     "/win32manifest:$WinDir\app.manifest" `
     "/resource:$PayloadZip,AntigravityCnSwitch.payload.zip" `
     "/out:$ExeOut" `

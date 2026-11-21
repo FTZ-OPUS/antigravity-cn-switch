@@ -38,6 +38,7 @@ swiftc -O \
   -o "$APP_DIR/Contents/MacOS/AntigravityCnSwitch"
 
 cp "$MAC_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$MAC_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 cp -R "$ROOT_DIR/patch" "$APP_DIR/Contents/Resources/patch"
 cp "$CACHE_NODE" "$APP_DIR/Contents/Resources/runtime/node"
 chmod +x "$APP_DIR/Contents/Resources/runtime/node"
