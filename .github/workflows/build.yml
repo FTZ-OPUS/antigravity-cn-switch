@@ -46,7 +46,7 @@ jobs:
               }
           }
           "@
-          $csc = Join-Path ([System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "csc.exe"
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           $mockAgSrc = Join-Path $env:TEMP "MockAg.cs"
           Set-Content -Path $mockAgSrc -Value $mockAgCs -Encoding UTF8
           & $csc /nologo /target:winexe /out:$MockAgExe $mockAgSrc
